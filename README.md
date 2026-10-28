@@ -170,13 +170,17 @@ function github_trending(language?: string, range?: "daily" | "weekly" | "monthl
 }
 ```
 
-两个必须知道的细节:
+三个必须知道的细节:
 
 - **返回里没有 `url` / `html_url`。** 链接只能从 `full_name` 推导:`https://github.com/{full_name}`。
   这是**确定性推导**不是编造——GitHub 的仓库 URL 就是这个形状,点进去必然对得上。
   (`users[].href` 是贡献者头像路径,**不是**仓库地址,别拿它当链接。)
 - **`newRepositories` 和 `seenRepositories` 两组都要进表**,新面孔在前。一个是新上榜,
   一个是连续上榜的老面孔,合起来才是完整榜单;只取一组,榜单就是残的。
+- **`stargazers_add` 是增量、`stargazers_count` 是累计**,两者取自页面不同位置(前者来自页脚
+  "N stars today",后者来自仓库链接区的星标数)。**30 秒自检**:数一数"增量 == 总数"的行数,
+  正常应该是 0 行;要有一整列相等,就是两个字段被映射错了。
+  另一个交叉验证法:换个周期再调一次,增量列量级应该明显变大,总数列不动。
 
 **没配 MCP 会怎样**:skill 会输出上面那张错误页,而不是编一份榜单。这是设计,不是故障。
 
@@ -226,8 +230,8 @@ node github-trending/scripts/validate.mjs --selftest                 # 用规范
 
 ## 冷启动实测:别人下载后到底什么效果
 
-派了一个**从没见过这个 skill 的 Agent** 当冷启动测试:只给它 `SKILL.md` 和 `references/`,
-自己读、自己跑,不提供任何额外指导。同一个题目跑两组——**带 skill** 和**不带 skill**。
+派了**从没见过的 Agent** 当冷启动测试:只给它 `SKILL.md` 和 `references/`,自己读、自己跑,
+不提供任何额外指导。同一个题目跑两组——**带 skill** 和**不带 skill**。
 
 测试环境里 `github-trending` MCP Server **没有注册**(`tool_search` 目录为空、
 `mcp_invoke` 报 `Unknown tool_name`、`mcp.json` 里没有这个 server),
@@ -235,13 +239,13 @@ node github-trending/scripts/validate.mjs --selftest                 # 用规范
 
 | 指标 | 带 skill | 不带 skill(基线) |
 |---|---|---|
-| 周期来源 | 用户请求原文 / 主动问 | **Agent 自己默认了 daily**,末尾才补一句"要周榜说一声" |
-| MCP 失败后 | 走错误页(或按许可拉起真 server) | **自己降级抓 GitHub Trending 页面**,解析后用 API 交叉校验 |
-| 数据真伪 | 无数据就明说失败 | 数据**是真的**(逐条 API 复核一致) |
-| 输出形态 | **纯 HTML**,无围栏无前后说明,校验器 0 违规 | 题目要"榜单"时给的是 **Markdown 表格 + 中文解读**;题目要"网页"时才给 HTML |
-| 校验器违规项 | **0** | 不适用(不是 HTML) |
+| 周期来源 | 写出原话**主动问**;拿不到回答就显式标注为假设 | **自己默认了 daily**,末尾才补一句"要周榜说一声" |
+| MCP 失败后 | 走错误页,或按用户许可拉起真 server | **自己降级抓 GitHub Trending 页面**,解析后用 API 交叉校验 |
+| 数据来源 | `github_trending` MCP 工具(**真调用**) | 抓页面 + GitHub API 复核(也是真的) |
+| 输出形态 | **纯 HTML**,五列固定顺序,无围栏无前后说明 | 题目要"榜单"时给的是 **Markdown 表格 + 中文解读**;题目要"网页"时才给 HTML |
+| 校验器 | `--period daily --expect-rows 11` → **全部检查通过** | 不适用(不是 HTML) |
 
-**结论:基线在"能不能搞到数据"上更强,带 skill 的那组在"产物是不是你要的东西"上更强。**
+**结论:基线在"能不能搞到数据"上不吃亏,带 skill 的那组在"产物是不是你要的东西"上稳赢。**
 
 这说明这个 skill 的价值**不在"能不能搞到数据"**——MCP 通路正常时两者一样,
 不通时基线反而更能扛。它价值在**约束产物**:
@@ -255,9 +259,14 @@ node github-trending/scripts/validate.mjs --selftest                 # 用规范
 | 冷启动暴露的问题 | 修法 |
 |---|---|
 | 用户请求里已经写了"weekly",skill 却要求"必须问",Agent 只能绕过 | 步骤 1 改成「**先确定周期**」:请求里给了就用,没给才问 |
-| **入参名 `period` 会被服务器静默忽略**,回落默认值 `daily`,交出一份周期完全不对的榜单 | 改成「按 schema 传参」+ **核对返回里回显的周期**,不等就按异常处理重试 |
+| **入参名 `period` 被服务器静默忽略**,回落默认值 `daily`,交出一份周期完全不对的榜单 | 改成「按 schema 传参」+ **核对返回里回显的周期**,不等就按异常处理重试 |
 | 返回**没有 url 字段**,原规则要求"不许拼 URL",会把整列链接逼成 `—` | 允许从 `full_name` 确定性推导 `https://github.com/{full_name}` |
 | 真实数据渲染时表头"Star 增量"被挤成两行;`text-transform:uppercase` 把字段名改成了"STAR" | 模板加 `white-space:nowrap` + `table-layout:fixed` + `overflow-wrap:anywhere`,并去掉 uppercase |
+
+> 顺带一提:冷启动的 Agent 自己读了一遍 `github-trending-mcp` 的 `dist/index.js`,
+> 确认了 `stargazers_count`(仓库链接区星标数=累计)和 `stargazers_add`(页脚 "N stars today"=增量)
+> **取自页面不同位置**,又用换周期实测交叉验证了一遍。这套"读源码 + 换周期对撞"的验法已写进
+> [`field-mapping.md`](github-trending/references/field-mapping.md)。
 
 ---
 
