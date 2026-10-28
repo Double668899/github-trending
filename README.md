@@ -22,7 +22,7 @@
 | 步骤 | 做什么 | 为什么 |
 |---|---|---|
 | **1. 先确定周期** | 用户请求里写了周期就用;没写就**主动问**(daily / weekly / monthly) | 周期错了整张表就错了,而错误是**看不出来的**那种 |
-| **2. 校验并调 MCP** | 周期归一化后必须落在 `daily`/`weekly`/`monthly`;不落在就重新问。然后调 `github_trending`,参数 `period` | 工具名和入参名照抄,不自造;返回里没有的字段写 `—`,不拿别的字段顶替 |
+| **2. 校验并调 MCP** | 周期归一化后必须落在 `daily`/`weekly`/`monthly`;不落在就重新问。调 `github_trending`,**入参名按工具 schema 的真实名字**,调用后**核对返回里回显的周期** | 入参名写错**不会报错**,服务器会静默用默认值 —— 这是最阴的一类错误 |
 | **3. 出 HTML** | 一整份自包含 HTML,表格固定五列 | 用户要的是能直接打开的一页,不是一段需要翻译的日志 |
 
 **问周期时的原话**(skill 里就是这句):
@@ -50,7 +50,12 @@
 <div class="wrap">
   <h1>GitHub Trending - weekly</h1>
   <p class="meta">周期:weekly · 数据来源:github_trending MCP · 共 N 个仓库</p>
+  <div class="table-wrap">
   <table>
+    <colgroup>
+      <col style="width:23%"><col style="width:11%"><col style="width:13%">
+      <col style="width:34%"><col style="width:19%">
+    </colgroup>
     <thead><tr>
       <th>仓库名称</th><th>Star 增量</th><th>总 Star 数量</th>
       <th>仓库简介</th><th>仓库链接</th>
@@ -65,6 +70,7 @@
       </tr>
     </tbody>
   </table>
+  </div>
 </div>
 </body>
 </html>
@@ -85,6 +91,10 @@
 **关键设计:不降级。** MCP 连不上时,这个 skill **不允许** Agent 改用自己抓网页、自己搜、自己凭记忆写——
 因为那样用户拿到的东西就不再是"来自 MCP 的榜单"了。要一份真的榜单,正确做法是把 MCP server 配好。
 
+> **唯一的例外**:宿主已经有 MCP 客户端(比如 `mcporter`)时,可以用它以 ad-hoc stdio 的方式拉起公开包
+> `github-trending-mcp`,调用**同一个工具名** `github_trending`——这是**真调用真工具**,不是编数据。
+> 但它会往临时目录装 npm 包,属于对用户机器的改动,**先问用户能不能装**;用户不允许就老实出错误页。
+
 ---
 
 ## 前置依赖:github-trending MCP Server
@@ -95,27 +105,78 @@
 |---|---|
 | MCP Server 名 | `github-trending` |
 | 工具名 | `github_trending` |
-| 入参 | `period`,取值 `daily` / `weekly` / `monthly` |
+| 周期入参名 | **按工具 schema 里的真实名字**——实测公开包 `github-trending-mcp` 用的是 `range`;有的 server 叫 `period` |
+| 周期取值 | `daily` / `weekly` / `monthly` |
+| 语言入参 | `language`(可选) |
 
-配置骨架:
+公开包的配置骨架:
 
 ```json
 {
   "mcpServers": {
     "github-trending": {
       "command": "npx",
-      "args": ["-y", "<该 MCP Server 的包名>"]
+      "args": ["-y", "github-trending-mcp"]
     }
   }
 }
 ```
 
-> **不同 server 的工具名和入参名可能不一样。** 例如公开的
-> `@npm_xiyuan/mcp-github-trending` 暴露的是 `get_trending_repos`,周期参数叫 `since`,
-> 返回里只有 `name` / `url` / `description` / `stars`(且 `stars` 是 `"1,234 stars today"`
-> 这种**带格式的字符串**,没有累计星标)。
-> skill 的规则是**按语义映射、不认死字段名**,所以换 server 仍然适用——
-> 但工具名和入参名要按你自己 server 的 schema 来,别照抄。
+### ⚠️ 入参名写错不会报错(实测)
+
+`github-trending-mcp` 的真实签名是:
+
+```ts
+function github_trending(language?: string, range?: "daily" | "weekly" | "monthly");
+```
+
+传 `--args '{"period":"weekly"}'` **不会报任何错**——服务器直接忽略未知字段,回落到默认值 `daily`,
+然后安安静静返回一份**日榜**。返回结构完全正常,肉眼看不出任何异常。
+
+所以 skill 里有两条硬规则:
+
+1. **入参名按 schema 来**,不按记忆,更不臆造;
+2. **调用后核对返回里回显的周期**(实测字段是 `range`),它必须等于你请求的周期。不等就是没传进去,
+   按异常处理重试——**绝不能把日榜当周榜交出去**。
+
+### 返回的真实结构(实测)
+
+```jsonc
+{
+  "language": null,          // 回显语言过滤
+  "range": "daily",          // 回显实际生效的周期 ← 必须核对
+  "count": 11,
+  "newRepositories": {       // 近 3 天没上过榜的「新面孔」
+    "count": 11, "note": "…", "repositories": [ /* … */ ]
+  },
+  "seenRepositories": {      // 近 3 天已经在榜上的
+    "count": 0, "note": "…", "repositories": [ /* … */ ]
+  },
+  "trendAnalysis": { "hasSufficientData": false, "analysisNote": "…" }
+}
+```
+
+单条记录:
+
+```jsonc
+{
+  "full_name": "elayadesign/ai-design-skills",  // → 仓库名称
+  "description": "",                            // → 仓库简介(空就写 —)
+  "language": "",
+  "stargazers_count": 10139,                    // → 总 Star 数量
+  "forks_count": 734,
+  "stargazers_add": 1395,                       // → Star 增量(随 range 变)
+  "users": [ { "avatar": "…", "href": "/elayadesign" }, … ]
+}
+```
+
+两个必须知道的细节:
+
+- **返回里没有 `url` / `html_url`。** 链接只能从 `full_name` 推导:`https://github.com/{full_name}`。
+  这是**确定性推导**不是编造——GitHub 的仓库 URL 就是这个形状,点进去必然对得上。
+  (`users[].href` 是贡献者头像路径,**不是**仓库地址,别拿它当链接。)
+- **`newRepositories` 和 `seenRepositories` 两组都要进表**,新面孔在前。一个是新上榜,
+  一个是连续上榜的老面孔,合起来才是完整榜单;只取一组,榜单就是残的。
 
 **没配 MCP 会怎样**:skill 会输出上面那张错误页,而不是编一份榜单。这是设计,不是故障。
 
@@ -174,13 +235,13 @@ node github-trending/scripts/validate.mjs --selftest                 # 用规范
 
 | 指标 | 带 skill | 不带 skill(基线) |
 |---|---|---|
-| 周期来源 | 用户请求原文 | **Agent 自己默认了 daily**,末尾才补一句"要周榜说一声" |
-| MCP 失败后 | 走错误页 | **自己降级抓 GitHub Trending 页面**,解析 11 条并用 API 交叉校验 |
-| 数据真伪 | 无数据,明说失败 | 数据**是真的**(11/11 条 API 复核一致) |
-| 输出形态 | **纯 HTML**,无围栏无前后说明,校验器 0 违规 | **Markdown 表格** + 中文解读 + 4 条观察 |
+| 周期来源 | 用户请求原文 / 主动问 | **Agent 自己默认了 daily**,末尾才补一句"要周榜说一声" |
+| MCP 失败后 | 走错误页(或按许可拉起真 server) | **自己降级抓 GitHub Trending 页面**,解析后用 API 交叉校验 |
+| 数据真伪 | 无数据就明说失败 | 数据**是真的**(逐条 API 复核一致) |
+| 输出形态 | **纯 HTML**,无围栏无前后说明,校验器 0 违规 | 题目要"榜单"时给的是 **Markdown 表格 + 中文解读**;题目要"网页"时才给 HTML |
 | 校验器违规项 | **0** | 不适用(不是 HTML) |
 
-**结论:基线拿到了更好的数据,带 skill 的那组拿到了更合规的产物。**
+**结论:基线在"能不能搞到数据"上更强,带 skill 的那组在"产物是不是你要的东西"上更强。**
 
 这说明这个 skill 的价值**不在"能不能搞到数据"**——MCP 通路正常时两者一样,
 不通时基线反而更能扛。它价值在**约束产物**:
@@ -189,11 +250,13 @@ node github-trending/scripts/validate.mjs --selftest                 # 用规范
 - 榜单里的每个数字都来自 MCP,不是"看起来很像"
 - 输出是一份能直接打开的 HTML,而不是需要用户二次加工的 Markdown
 
-冷启动还挖出两个真问题,已修:
+冷启动还挖出四个真问题,已全部修掉:
 
 | 冷启动暴露的问题 | 修法 |
 |---|---|
 | 用户请求里已经写了"weekly",skill 却要求"必须问",Agent 只能绕过 | 步骤 1 改成「**先确定周期**」:请求里给了就用,没给才问 |
+| **入参名 `period` 会被服务器静默忽略**,回落默认值 `daily`,交出一份周期完全不对的榜单 | 改成「按 schema 传参」+ **核对返回里回显的周期**,不等就按异常处理重试 |
+| 返回**没有 url 字段**,原规则要求"不许拼 URL",会把整列链接逼成 `—` | 允许从 `full_name` 确定性推导 `https://github.com/{full_name}` |
 | 真实数据渲染时表头"Star 增量"被挤成两行;`text-transform:uppercase` 把字段名改成了"STAR" | 模板加 `white-space:nowrap` + `table-layout:fixed` + `overflow-wrap:anywhere`,并去掉 uppercase |
 
 ---

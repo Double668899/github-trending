@@ -1,88 +1,101 @@
-# 字段映射：MCP 返回 → 表格五列
+# 字段映射:MCP 返回 → 表格五列
 
-MCP Server 的返回结构**不保证字段名固定**。先看一次真实返回，再按下表做**语义**映射，
-不要按字段名硬套，也不要因为字段名不认识就跳过整个表。
+MCP Server 的返回结构**不保证字段名固定**。先看一次真实返回,再按下表做**语义**映射,
+不要按字段名硬套,也不要因为字段名不认识就跳过整个表。
+
+> 下面的"真实返回"一节是**实测**出来的(2026-10-28,`github-trending-mcp` npm 包),不是猜的。
+> 换 server 时以你那边的实际返回为准,但**映射规则**不变。
 
 ## 五个语义列
 
 | 表格列 | 语义 | 常见候选字段名 |
 |---|---|---|
-| 仓库名称 | 仓库的 owner/name 展示名 | `repo`, `repository`, `name`, `full_name`, `repo_name`, `project` |
-| Star 增量 | **该周期内新增**的 star | `stars_today`, `stars_this_week`, `stars_this_month`, `period_stars`, `stars_period`, `new_stars`, `stars`（当它只随周期变化时） |
-| 总 Star 数量 | 仓库累计 star | `total_stars`, `stargazers_count`, `stars_total`, `total_stargazers`, `stars_count` |
-| 仓库简介 | 一句话描述 | `description`, `desc`, `summary`, `about` |
-| 仓库链接 | 仓库主页 URL | `url`, `html_url`, `link`, `repo_url`, `repository_url` |
+| 仓库名称 | 仓库的 owner/name 展示名 | `full_name`, `repo`, `repository`, `name`, `repo_name` |
+| Star 增量 | **该周期内新增**的 star | `stargazers_add`, `stars_today`, `stars_this_week`, `stars_this_month`, `period_stars`, `new_stars` |
+| 总 Star 数量 | 仓库累计 star | `stargazers_count`, `total_stars`, `stars_total`, `total_stargazers` |
+| 仓库简介 | 一句话描述 | `description`, `desc`, `summary` |
+| 仓库链接 | 仓库主页 URL | `url`, `html_url`, `link`, `repo_url`(**可能根本没有**——见下) |
 
 ## 映射规则
 
-1. **先 dump 返回结构，再映射。** 看清楚数组在顶层还是 `repos` / `data` / `items` / `results` 下面，
-   一条记录是对象还是数组。结构没看清就写映射，一定会错位。
-2. **按语义挑字段，不按名字挑。** `stars` 这种中性名字要看它随 `period` 变不变：
-   - `period=weekly` 时它明显变大 → 它是**增量**
+1. **先 dump 返回结构,再映射。** 看清楚数组在顶层还是 `repos` / `data` / `items` / `results` 下面,
+   一条记录是对象还是数组。结构没看清就写映射,一定会错位。
+2. **按语义挑字段,不按名字挑。** `stars` 这种中性名字要看它随周期变不变:
+   - `range=weekly` 时它明显变大 → 它是**增量**
    - 同一字段数量级和累计 star 相当 → 它是**总 Star**
-   判断不了就当没有这个字段，写 `—`，别硬塞。
-3. **增量与总数是两回事，绝不互相顶替。** 把累计星标当"本周新增"是本页最严重的错，
-   因为它看起来完全合理，不核对数字根本发现不了。
-4. **仓库名与链接要对得上。** 链接来自 `url`/`html_url`；链接里的路径段应与仓库名一致。
-   对不上时以链接为准并在页面注明，或干脆标 `—`，不要拼一个假的。
-5. **缺字段就写 `—`。** 五个列都必须存在，值可以是 `—`；但**列不能少、也不能多**。
-6. **不要"顺手补全"。** 返回里没写简介就留空，不要根据仓库名猜它做什么——
-   猜出来的那句简介会混进榜单，看起来像真数据。
+   判断不了就当没有这个字段,写 `—`,别硬塞。
+3. **增量与总数是两回事,绝不互相顶替。** 把累计星标当"本周新增"是本页最严重的错,
+   因为它看起来完全合理,不核对数字根本发现不了。
+4. **仓库链接:能取 URL 就用 URL;取不到就从 `full_name` 推导。**
+   `full_name` 是 `owner/repo` 形态时,`https://github.com/{full_name}` 是**确定性推导**,
+   不是编的——GitHub 的仓库 URL 就是这个形状,点进去必然对得上。
+   > ⚠️ 只有当 `full_name` **确实是 `owner/repo` 形态**时才这么拼。
+   > 如果那个字段不是这个形状(比如是纯仓库名、或者带路径前缀),**不要拼**,写 `—`。
+5. **缺字段就写 `—`。** 五列都必须存在,值可以是 `—`;但**列不能少、也不能多**。
+6. **不要"顺手补全"。** 返回里没写简介就留空(`—`),不要根据仓库名猜它做什么——
+   猜出来的那句简介会混进榜单,看起来像真数据。
 
-## 常见返回形态
+---
+
+## 真实返回(实测,`github-trending-mcp`)
+
+顶层结构是**两组仓库**,不是一个扁平数组:
 
 ```jsonc
-// 形态 A：顶层数组
-[{ "repo": "owner/name", "stars_today": 128, "total_stars": 4210,
-   "description": "…", "url": "https://github.com/owner/name" }]
-
-// 形态 B：对象包裹
-{ "repos": [{ "name": "owner/name", "stars": 128, "stargazers_count": 4210, … }] }
-
-// 形态 C：带周期提示
-{ "period": "weekly", "items": [{ "full_name": "owner/name",
-   "period_stars": 512, "total_stars": 9800, "html_url": "…", "description": "…" }] }
+{
+  "language": null,          // 回显你传的语言过滤
+  "range": "daily",          // 回显**实际生效**的周期 ← 必须核对
+  "count": 11,
+  "newRepositories": {       // 近 3 天没上过 trending 的「新面孔」
+    "count": 11,
+    "note": "These repos have NOT appeared in trending within the last 3 days...",
+    "repositories": [ /* … */ ]
+  },
+  "seenRepositories": {      // 近 3 天已经在榜上的
+    "count": 0,
+    "note": "These repos have appeared in trending within the last 3 days...",
+    "repositories": [ /* … */ ]
+  },
+  "trendAnalysis": { "hasSufficientData": false, "analysisNote": "…" }
+}
 ```
 
-形态 B 里的 `stars`（128）对应形态 A 的 `stars_today`——**同一个中性名字在不同 server 里含义可能不同**，
-所以第 2 条规则（看它随周期变不变）比字段名可靠。
+单条记录:
 
-## 真实返回样例（公开 MCP server 的常见形态）
-
-有些 server 直接把 GitHub 页面上的文案搬过来，`stars` 是**带格式的字符串**而不是数字：
-
-```json
-[{ "name": "owner/repo-name",
-   "url": "https://github.com/owner/repo-name",
-   "description": "Repository description",
-   "stars": "1,234 stars today" }]
+```jsonc
+{
+  "full_name": "elayadesign/ai-design-skills",  // → 仓库名称
+  "description": "",                            // → 仓库简介(空就是空,写 —)
+  "language": "",                               // 编程语言
+  "stargazers_count": 10139,                    // → 总 Star 数量
+  "forks_count": 734,
+  "stargazers_add": 1395,                       // → Star 增量(随 range 变)
+  "users": [ { "avatar": "…", "href": "/elayadesign" }, … ]
+}
 ```
 
-这种返回要特别注意三件事：
+### 三个必须注意的点
 
-1. **`stars` 是该周期的增量，不是累计星标。** 字符串里带 `today` / `this week` / `this month`
-   就是周期增量，取数字部分（`1,234` → `1234`）填进「Star 增量」列。
-2. **它不是总 Star。** 同一个 server 往往**只透出增量、不透出累计星标**——GitHub Trending 页面本身
-   是同时有累计 star 和周期增量的（页面星标图标旁那个数就是累计值），但 server 未必把两个数都带出来。
-   这时「总 Star 数量」列写 `—`，**不要**拿增量顶替，也不要去猜一个数。
-   > 用户看到一整列 `—` 是诚实的；看到一列被填错的累计星标，用户无从察觉。
-3. **周期词要和本次周期对上。** 返回里写着 `stars today` 而用户要的是 monthly，
-   说明拿到的不是他要的周期——按异常处理重试或如实标注，不要当成 monthly 的数填进去。
+1. **返回里没有 `url` / `html_url`。** 链接只能从 `full_name` 推导(见映射规则第 4 条)。
+   别去 `users[].href` 里找——那是贡献者头像的路径,不是仓库地址。
+2. **`newRepositories` 和 `seenRepositories` 两组都要用。**
+   一个是"新面孔",一个是"连续上榜的老面孔",**合起来才是完整榜单**。
+   只取一组,榜单就是残的。而且这两组是**缓存判定**的(3 天窗口),
+   同一个仓库在两次调用之间可能从 `new` 挪到 `seen`——这是正常的,别当成数据错误。
+   排序:先 `new` 后 `seen`(新面孔在前),组内按服务器给的顺序。
+3. **`range` 字段是回显,必须核对。** 它告诉你服务器**实际用了哪个周期**。
+   你要 `weekly` 而回显是 `daily`,说明周期没传进去(入参名不对,详见 SKILL.md 步骤 2)——
+   **按异常处理重试,绝不能把 daily 的数据当 weekly 交出去。**
+   > 这是最阴的一类错误:参数名写错不会报错,服务器会**静默用默认值**,
+   > 然后你交出一份周期完全不对、但看起来毫无破绽的榜单。
 
-## 各列没数据时的写法
-
-| 列 | 拿不到就写 | 不要写成 |
-|---|---|---|
-| Star 增量 | `—` | 总 star、猜的数 |
-| 总 Star 数量 | `—` | 周期增量 |
-| 仓库简介 | `—` | 根据仓库名编一句 |
-| 仓库链接 | `—` | 拼一个 `https://github.com/` + 名字猜的 URL |
+---
 
 ## 值怎么写
 
 | 值 | 写法 |
 |---|---|
-| Star 增量 | 原始数字即可，`128`；页面 CSS 负责加号与配色 |
-| 总 Star | 原始数字即可，`4,210`（千分位纯展示，不改数值） |
-| 简介 | 原样；过长用 CSS 截断，不要改写措辞 |
-| 缺失 | `—`（em dash），不要写 `null` / `undefined` / 空字符串 |
+| Star 增量 | 原始数字即可,`128`;页面 CSS 负责加号与配色 |
+| 总 Star | 原始数字即可,`4,210`(千分位纯展示,不改数值) |
+| 简介 | 原样;过长用 CSS 截断,不要改写措辞;空 → `—` |
+| 缺失 | `—`(em dash),不要写 `null` / `undefined` / 空字符串 |
